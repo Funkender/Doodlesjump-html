@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>Doodle Jump – Cool Edition</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+  <style>
+    html,body { margin:0; height:100%; background:#000; }
+    canvas { display:block; width:100vw; height:100vh; background:#0a0f18; }
+    #hud {
+      position:fixed; top:10px; left:50%; transform:translateX(-50%);
+      color:#00ffd0; font-family:system-ui, sans-serif; font-weight:700; text-shadow:0 0 10px #00ffd0;
+      z-index:10;
+    }
+    #hud span { margin:0 12px; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><span id="score">Score: 0</span><span id="status"></span></div>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha:false });
+
+// Weltgrößen
+let W = 0, H = 0;
+function resize(){
+  canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
+  canvas.height = Math.floor(window.innerHeight * devicePixelRatio);
+  W = canvas.width; H = canvas.height;
+  // Kamera neu justieren
+  camY = Math.min(camY, player.y - H*0.45);
+}
+window.addEventListener('resize', resize);
+
+// Konstanten
+const GRAV = 0.35;
+const JUMP_VY = -12.5;
+const SPRING_VY = -18;
+const MOVE_SPEED = 0.6;
+const WRAP = true;
+
+// Spieler
+const player = { x: 0, y: 0, w: 36, h: 36, vx: 0, vy: 0, alive: true, facing: 1, jet: 0, shield: false };
+
+// Kamera/Score
+let camY = 0;
+let score = 0, multiplier = 1;
+let bestY = 0; // höchste erreichte Höhe (kleinste y)
+const scoreEl = document.getElementById('score');
+const statusEl = document.getElementById('status');
+
+// Fabriken
+function makePlatform(x,y,type='solid'){ return { x, y, w: 90, h: 14, type, vx:(type==='move'?(Math.random()<0.5?0.5:-0.5):0), broken:false, spring:(type==='spring') }; }
+function makeEnemy(x,y){ return { x, y, w: 32, h: 26, phase: Math.random()*Math.PI*2 }; }
+function makeStar(x,y){ return { x, y, w: 20, h: 20 }; }
+function makePowerUp(x,y,type){ return { x, y, w: 24, h: 24, type }; }
+
+// Weltobjekte
+let platforms = [], enemies = [], stars = [], powerups = [];
+let maxYGenerated = 0;
+
+// Initiale Welt
+function initWorld(){
+  platforms = []; enemies = []; stars = []; powerups = [];
+  const baseY = H - 40;
+  for(let i=0;i<12;i++){
+    platforms.push(makePlatform((i*120)%W, baseY - i*70, i%4===0?'move':'solid'));
+    maxYGenerated = baseY - i*70;
+  }
+  platforms.push(makePlatform(W*0.7, maxYGenerated - 120, 'spring'));
+  maxYGenerated -= 120;
+  enemies.push(makeEnemy(W*0.4, maxYGenerated - 200));
+}
+
+// Prozedurale Generierung (Weltkoordinaten)
+function genAbove(targetTop){
+  while(maxYGenerated > targetTop - H*2){
+    maxYGenerated -= 70;
+    const r = Math.random();
+    let type = 'solid';
+    if(r < 0.15) type = 'spring';
+    else if(r < 0.3) type = 'move';
+    else if(r < 0.45) type = 'break';
+    else if(r < 0.55) type = 'trampoline';
+    else if(r < 0.65) type = 'disappear';
+
+    const x = Math.random()*(W-100)+50;
+    platforms.push(makePlatform(x, maxYGenerated, type));
+
+    if(Math.random() < 0.12) enemies.push(makeEnemy(Math.random()*W, maxYGenerated - 100));
+    if(Math.random() < 0.10) stars.push(makeStar(Math.random()*W, maxYGenerated - 150));
+    if(Math.random() < 0.06) powerups.push(makePowerUp(Math.random()*W, maxYGenerated - 200, Math.random()<0.5?'jetpack':'shield'));
+  }
+}
+
+// Input
+let left=false, right=false;
+window.addEventListener('keydown', e=>{
+  if(e.key==='ArrowLeft'||e.key==='a') left = true;
+  if(e.key==='ArrowRight'||e.key==='d') right = true;
+  if(e.key===' ' && player.alive && player.jet > 0){ player.vy = SPRING_VY; player.jet--; }
+});
+window.addEventListener('keyup', e=>{
+  if(e.key==='ArrowLeft'||e.key==='a') left = false;
+  if(e.key==='ArrowRight'||e.key==='d') right = false;
+});
+window.addEventListener('touchstart', e=>{
+  if(!player.alive){ restart(); return; }
+  const x = e.changedTouches[0].clientX;
+  if(x < window.innerWidth/2){ left = true; right = false; } else { right = true; left = false; }
+}, { passive:true });
+window.addEventListener('touchend', ()=>{ left = false; right = false; }, { passive:true });
+
+// Update (Weltkoordinaten)
+function update(){
+  if(!player.alive) return;
+
+  // Horizontal
+  if(left) player.vx = Math.max(player.vx - MOVE_SPEED, -6);
+  else if(right) player.vx = Math.min(player.vx + MOVE_SPEED, 6);
+  else player.vx *= 0.92;
+
+  player.x += player.vx;
+  player.facing = (player.vx >= 0) ? 1 : -1;
+
+  // Wrap/Rand
+  if(WRAP){
+    if(player.x < -player.w) player.x = W;
+    if(player.x > W) player.x = -player.w;
+  } else {
+    player.x = Math.max(0, Math.min(W - player.w, player.x));
+  }
+
+  // Vertikal
+  player.vy += GRAV;
+  player.y += player.vy;
+
+  // Kamera folgt Höhe
+  camY = Math.min(camY, player.y - H*0.45);
+
+  // Generierung
+  genAbove(camY - H);
+
+  // Bewegte Plattformen
+  for(const p of platforms){
+    if(p.type==='move'){
+      p.x += p.vx;
+      if(p.x < 20 || p.x + p.w > W-20) p.vx *= -1;
+    }
+  }
+
+  // Gegnerbewegung
+  for(const e of enemies){
+    e.phase += 0.03;
+    e.x += Math.sin(e.phase) * 0.8;
+  }
+
+  // Plattformkollision nur beim Fallen
+  if(player.vy > 0){
+    for(const p of platforms){
+      const overlapX = (player.x + player.w > p.x) && (player.x < p.x + p.w);
+      const crossing = (player.y - player.vy + player.h) <= p.y && (player.y + player.h) >= p.y;
+      if(overlapX && crossing && !p.broken){
+        if(p.type==='break'){ p.broken=true; p.h=8; player.vy = JUMP_VY*0.6; }
+        else if(p.type==='spring'){ player.vy = SPRING_VY; player.jet = Math.min(2, player.jet+1); }
+        else if(p.type==='trampoline'){ player.vy = SPRING_VY*1.2; }
+        else if(p.type==='disappear'){ p.broken=true; player.vy = JUMP_VY; }
+        else { player.vy = JUMP_VY; }
+      }
+    }
+  }
+
+  // Gegnerkollision
+  for(const e of enemies){
+    const intersect = !(player.x + player.w <= e.x || player.x >= e.x + e.w || player.y + player.h <= e.y || player.y >= e.y + e.h);
+    if(intersect){
+      const falling = player.vy > 0 && (player.y - player.vy + player.h) <= e.y && (player.y + player.h) >= e.y;
+      if(falling){ player.vy = SPRING_VY*0.8; enemies.splice(enemies.indexOf(e),1); }
+      else if(player.shield){ player.shield=false; enemies.splice(enemies.indexOf(e),1); }
+      else { die(); return; }
+    }
+  }
+
+  // Sterne (Multiplikator)
+  for(const s of stars){
+    const intersect = !(player.x + player.w <= s.x || player.x >= s.x + s.w || player.y + player.h <= s.y || player.y >= s.y + s.h);
+    if(intersect){
+      multiplier++;
+      stars.splice(stars.indexOf(s),1);
+      setTimeout(()=> multiplier = Math.max(1, multiplier-1), 5000);
+    }
+  }
+
+  // Power-Ups
+  for(const p of powerups){
+    const intersect = !(player.x + player.w <= p.x || player.x >= p.x + p.w || player.y + player.h <= p.y || player.y >= p.y + p.h);
+    if(intersect){
+      if(p.type==='jetpack'){ player.jet = 5; }
+      if(p.type==='shield'){ player.shield = true; }
+      powerups.splice(powerups.indexOf(p),1);
+    }
+  }
+
+  // Score: höchste erreichte Höhe (stabil, nur Weltkoordinaten)
+  if(player.y < bestY){
+    bestY = player.y;
+    score = Math.floor((H - bestY) / 10) * multiplier;
+    scoreEl.textContent = 'Score: ' + score;
+  }
+
+  // Fail unten außerhalb
+  if(player.y - camY > H + 80){ die(); }
+
+  // Cleanup
+  const minY = camY + H + 140;
+  platforms = platforms.filter(p => p.y < minY);
+  enemies   = enemies.filter(e => e.y < minY);
+  stars     = stars.filter(s => s.y < minY);
+  powerups  = powerups.filter(p => p.y < minY);
+}
+
+function die(){
+  if(!player.alive) return;
+  player.alive = false;
+  statusEl.textContent = 'Game Over — tippen/klicken zum Neustart';
+}
+
+// Render (Screenkoordinaten via camY)
+function draw(){
+  // Hintergrund
+  ctx.fillStyle = '#0a0f18';
+  ctx.fillRect(0,0,W,H);
+
+  // Parallax-Streifen
+  ctx.fillStyle = 'rgba(0,255,208,0.06)';
+  for(let i=0;i<6;i++){
+    const y = ((i*90*devicePixelRatio) + ((-camY*0.2) % H) + H) % H;
+    ctx.fillRect(0,y,W,6*devicePixelRatio);
+  }
+
+  // Plattformen
+  for(const p of platforms){
+    const sy = p.y - camY;
+    if(sy < -50 || sy > H+50) continue;
+    ctx.fillStyle =
+      (p.type==='spring')     ? '#00ffd0' :
+      (p.type==='trampoline') ? '#00ffa0' :
+      (p.type==='disappear')  ? (p.broken ? 'rgba(255,255,255,0.2)' : '#cccccc') :
+      (p.type==='break')      ? (p.broken ? 'rgba(255,85,85,0.5)' : '#ff5555') :
+      (p.type==='move')       ? '#2b3b55' : '#1f2937';
+    ctx.fillRect(p.x, sy, p.w, p.h);
+    ctx.fillStyle = 'rgba(255,255,255,0.08)';
+    ctx.fillRect(p.x, sy, p.w, 3);
+
+    if(p.spring){
+      ctx.strokeStyle = '#00ffd0';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      for(let i=0;i<14;i++){
+        const xx = p.x + 10 + i*4;
+        const yy = sy + 2 + Math.sin(i*0.8)*3;
+        if(i===0) ctx.moveTo(xx,yy); else ctx.lineTo(xx,yy);
+      }
+      ctx.stroke();
+    }
+  }
+
+  // Gegner
+  for(const e of enemies){
+    const sy = e.y - camY;
+    if(sy < -50 || sy > H+50) continue;
+    ctx.fillStyle = '#ff2d55';
+    ctx.fillRect(e.x, sy, e.w, e.h);
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(e.x+6, sy+6, 6, 6);
+    ctx.fillRect(e.x+e.w-12, sy+6, 6, 6);
+  }
+
+  // Sterne
+  for(const s of stars){
+    const sy = s.y - camY;
+    if(sy < -50 || sy > H+50) continue;
+    ctx.fillStyle = '#ffd700';
+    ctx.beginPath();
+    const cx = s.x + s.w/2, cy = sy + s.h/2, r = 10;
+    for(let i=0;i<5;i++){
+      const a = i*2*Math.PI/5 - Math.PI/2;
+      const ax = cx + Math.cos(a)*r;
+      const ay = cy + Math.sin(a)*r;
+      if(i===0) ctx.moveTo(ax,ay); else ctx.lineTo(ax,ay);
+      const a2 = a + Math.PI/5;
+      ctx.lineTo(cx + Math.cos(a2)*r*0.5, cy + Math.sin(a2)*r*0.5);
+    }
+    ctx.closePath(); ctx.fill();
+  }
+
+  // Power-Ups
+  for(const p of powerups){
+    const sy = p.y - camY;
+    if(sy < -50 || sy > H+50) continue;
+    ctx.fillStyle = (p.type==='jetpack') ? '#00b3ff' : '#00ff6a';
+    ctx.fillRect(p.x, sy, p.w, p.h);
+  }
+
+  // Spieler
+  const sy = player.y - camY;
+  ctx.fillStyle = player.alive ? '#00eaff' : 'rgba(0,234,255,0.5)';
+  ctx.beginPath();
+  const r = 8, x = player.x, y = sy, w = player.w, h = player.h;
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r);
+  ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r);
+  ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath(); ctx.fill();
+
+  // Auge
+  ctx.fillStyle = '#001f2a';
+  const eyeY = y + h*0.35;
+  const eyeX = x + (player.facing>0? w*0.62 : w*0.28);
+  ctx.beginPath(); ctx.arc(eyeX, eyeY, 4, 0, Math.PI*2); ctx.fill();
+
+  // Leuchtspur
+  if(player.vy < -10){
+    ctx.strokeStyle = 'rgba(0,255,255,0.4)';
+    ctx.beginPath();
+    ctx.moveTo(x + w/2, y + h);
+    ctx.lineTo(x + w/2, y + h + 20);
+    ctx.stroke();
+  }
+
+  // Schildanzeige
+  if(player.shield){
+    ctx.strokeStyle = 'rgba(0,255,106,0.6)';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x-2, y-2, w+4, h+4);
+  }
+}
+
+// Loop
+function loop(){ update(); draw(); requestAnimationFrame(loop); }
+
+// Restart
+function restart(){
+  score = 0; multiplier = 1;
+  player.x = Math.floor(W/2); player.y = Math.floor(H/2);
+  player.vx = 0; player.vy = -8;
+  player.alive = true; player.jet = 0; player.shield = false;
+  camY = player.y - H*0.45;
+  bestY = player.y; // Score-Referenz setzen
+  initWorld();
+  genAbove(camY - H);
+  statusEl.textContent = '';
+  scoreEl.textContent = 'Score: 0';
+}
+
+// Klick zum Neustart
+window.addEventListener('mousedown', ()=>{
+  if(!player.alive){ restart(); }
+});
+
+// Start
+resize();
+restart();
+loop();
+</script>
+</body>
+</html>
